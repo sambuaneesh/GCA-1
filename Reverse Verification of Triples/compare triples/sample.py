@@ -1,7 +1,7 @@
 from Extract triples.extract_triples import *
 from concurrent.futures import ThreadPoolExecutor,as_completed
 
-MODEL="gpt-3.5-turbo"
+MODEL="gemini-2.0-flash-lite"
 
 data_path= ''
 

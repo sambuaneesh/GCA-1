@@ -1,46 +1,60 @@
 import json
 from Extract triples.extract_triples import save_data,load_progress
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from openai import OpenAI
-import openai
+import google.generativeai as genai
 import time
 import re
+import os
 
-gpt3_client = OpenAI()
-
-gpt4_client = OpenAI()
+# Configure Gemini API
+genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
+gemini_client = genai.GenerativeModel('gemini-2.0-flash-lite')
 
 def gpt3_request_api(prompt,model,temperature):
     flag = True
     while flag:
         try:
-            message = [{'role': 'user', 'content': prompt}]
-            response = gpt3_client.chat.completions.create(model=model, messages=message, max_tokens=500, n=1,temperature=temperature)
-            text_response = response.choices[0].message.content.strip()
+            generation_config = genai.types.GenerationConfig(
+                temperature=temperature,
+                max_output_tokens=500,
+            )
+            response = gemini_client.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+            text_response = response.text.strip()
             flag = False
             return text_response
-        except openai.RateLimitError as e:
-            print("speed limit exceeded")
-            time.sleep(0.01)
         except Exception as e:
-            print('gpt3:',e)
-            time.sleep(0.005)
+            if "quota" in str(e).lower() or "rate" in str(e).lower():
+                print("Rate limit exceeded")
+                time.sleep(0.01)
+            else:
+                print('gemini error:',e)
+                time.sleep(0.005)
 
 def gpt4_request_api(prompt,model,temperature):
     flag = True
     while flag:
         try:
-            message = [{'role': 'user', 'content': prompt}]
-            response = gpt4_client.chat.completions.create(model=model, messages=message, max_tokens=500, n=1,temperature=temperature)
-            text_response = response.choices[0].message.content.strip()
+            generation_config = genai.types.GenerationConfig(
+                temperature=temperature,
+                max_output_tokens=500,
+            )
+            response = gemini_client.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+            text_response = response.text.strip()
             flag = False
             return text_response
-        except openai.RateLimitError as e:
-            print("speed limit exceeded")
-            time.sleep(0.01)
         except Exception as e:
-            print('gpt4:',e)
-            time.sleep(0.005)
+            if "quota" in str(e).lower() or "rate" in str(e).lower():
+                print("Rate limit exceeded")
+                time.sleep(0.01)
+            else:
+                print('gemini error:',e)
+                time.sleep(0.005)
 
 
 data_path=''
@@ -51,9 +65,9 @@ with open(data_path, "r", encoding='utf-8') as f:
     content = f.read()
 dataset = json.loads(content)
 
-MODEL_PREDICTION_RELATIONSHIP='gpt-3.5-turbo'
+MODEL_PREDICTION_RELATIONSHIP='gemini-2.0-flash-lite'
 
-MODEL= 'gpt-4-0125-preview'
+MODEL= 'gemini-2.0-flash-lite'
 
 GPT_PREDICTION_RELATION_PROMPT = \
 """In the knowledge graph, knowledge triples are a basic data structure used to represent and store information. A knowledge triplet usually consists of three parts: head entity, relationship, and tail entity. This structure helps represent the relationships between entities in a structured way. \

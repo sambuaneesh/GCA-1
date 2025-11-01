@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor,as_completed
 data_path = ''
 save_path = ''
 
-MODEL = "gpt-4-0125-preview"
+MODEL = "gemini-2.0-flash-lite"
 
 def generate_prompt(sample_triples, unverified_triple):
     return f"""
