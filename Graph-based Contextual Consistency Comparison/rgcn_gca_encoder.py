@@ -15,6 +15,7 @@ Author: integration shim for GCA RGCN
 
 import json
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 import dgl
@@ -96,9 +97,7 @@ class GraphLinkPredict(nn.Module):
     def forward(self, g: dgl.DGLGraph, feats: torch.Tensor) -> torch.Tensor:
         return self.encoder(g, feats)
 
-    def calc_score(
-        self, node_emb: torch.Tensor, triplets: torch.Tensor
-    ) -> torch.Tensor:
+    def calc_score(self, node_emb: torch.Tensor, triplets: torch.Tensor) -> torch.Tensor:
         """
         triplets: LongTensor [B, 3] with (head_idx, rel_id, tail_idx)
         returns logits (pre-sigmoid) [B]
@@ -108,9 +107,7 @@ class GraphLinkPredict(nn.Module):
         o = node_emb[triplets[:, 2]]
         return torch.sum(s * r * o, dim=1)
 
-    def get_loss(
-        self, node_emb: torch.Tensor, samples: torch.Tensor, labels: torch.Tensor
-    ) -> torch.Tensor:
+    def get_loss(self, node_emb: torch.Tensor, samples: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         logits = self.calc_score(node_emb, samples)
         return nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
 
@@ -150,9 +147,7 @@ class TextFeaturer:
         if self.embedder is None:
             # random features (caller may set torch.manual_seed for reproducibility)
             return torch.randn(len(texts), self.feat_dim)
-        vec = self.embedder.encode(
-            texts, convert_to_numpy=True, normalize_embeddings=True
-        )
+        vec = self.embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
         return torch.tensor(vec, dtype=torch.float32)
 
 
@@ -197,30 +192,79 @@ def build_dgl_from_triples(
     return g, node2idx, node_feats, triplet_idx
 
 
-def load_pretrained_predictor(
-    ckpt_path: str,
-    device: torch.device,
-) -> GraphLinkPredict:
-    """
-    Load GraphLinkPredict + GCARGCN from a checkpoint produced by train_gca_rgcn.py
-    """
+def _infer_dims_from_state(state_dict):
+    # Find layer weight keys like: encoder.layers.{i}.linear_r.W
+    layer_keys = [k for k in state_dict.keys() if k.startswith("encoder.layers.") and k.endswith("linear_r.W")]
+    if not layer_keys:
+        raise ValueError("Could not find any 'encoder.layers.*.linear_r.W' in checkpoint state_dict.")
+
+    # Extract layer indices and sort
+    layer_ids = sorted(int(re.findall(r"encoder\.layers\.(\d+)\.", k)[0]) for k in layer_keys)
+    first_key = f"encoder.layers.{layer_ids[0]}.linear_r.W"
+    last_key = f"encoder.layers.{layer_ids[-1]}.linear_r.W"
+
+    # Shapes are [num_rels, in_feat, out_feat]
+    nr_first, in_first, out_first = state_dict[first_key].shape
+    nr_last, in_last, out_last = state_dict[last_key].shape
+
+    num_layers = layer_ids[-1] - layer_ids[0] + 1
+    num_rels = nr_first  # should match across layers
+
+    # Heuristic: for 2+ layers, h_dim is the out_feat of layer 0, out_dim is out_feat of last layer
+    in_dim = in_first
+    h_dim = out_first
+    out_dim = out_last
+
+    return in_dim, h_dim, out_dim, num_rels, num_layers
+
+
+def load_pretrained_predictor(ckpt_path: str, device: torch.device) -> GraphLinkPredict:
     ckpt = torch.load(ckpt_path, map_location=device)
+
     if "state_dict" not in ckpt:
-        raise ValueError(f"Checkpoint at {ckpt_path} missing 'state_dict' key")
+        raise ValueError(f"Checkpoint at {ckpt_path} missing 'state_dict'")
+
+    state = ckpt["state_dict"]
+
+    # Prefer inferring dims from weights; fall back to metadata if needed
+    try:
+        in_dim_s, h_dim_s, out_dim_s, num_rels_s, num_layers_s = _infer_dims_from_state(state)
+        in_dim = in_dim_s
+        h_dim = h_dim_s
+        out_dim = out_dim_s
+        num_rels = int(ckpt.get("num_rels", num_rels_s))
+        num_layers = int(ckpt.get("num_layers", num_layers_s))
+    except Exception as e:
+        print(f"[WARN] dim inference failed ({e}); using ckpt metadata.")
+        in_dim = int(ckpt["in_dim"])
+        h_dim = int(ckpt["h_dim"])
+        out_dim = int(ckpt["out_dim"])
+        num_rels = int(ckpt["num_rels"])
+        num_layers = int(ckpt["num_layers"])
+
+    num_bases = int(ckpt.get("num_bases", -1))
+    dropout = float(ckpt.get("dropout", 0.1))
+    self_loop = bool(ckpt.get("self_loop", True))
+
+    print(
+        f"[RGCN] Using dims from weights: in={in_dim}, h={h_dim}, out={out_dim}, "
+        f"num_rels={num_rels}, num_layers={num_layers}, num_bases={num_bases}"
+    )
 
     enc = GCARGCN(
-        in_dim=int(ckpt["in_dim"]),
-        h_dim=int(ckpt["h_dim"]),
-        out_dim=int(ckpt["out_dim"]),
-        num_rels=int(ckpt["num_rels"]),
-        num_layers=int(ckpt["num_layers"]),
-        num_bases=int(ckpt["num_bases"]),
-        dropout=float(ckpt["dropout"]),
-        self_loop=bool(ckpt.get("self_loop", True)),
+        in_dim=in_dim,
+        h_dim=h_dim,
+        out_dim=out_dim,
+        num_rels=num_rels,
+        num_layers=num_layers,
+        num_bases=num_bases,
+        dropout=dropout,
+        self_loop=self_loop,
     ).to(device)
 
     model = GraphLinkPredict(enc).to(device)
-    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+
+    missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
         print(f"[WARN] load_state_dict: missing={missing}, unexpected={unexpected}")
     model.eval()
@@ -254,10 +298,7 @@ def score_triples_with_checkpoint(
 
     # If SBERT dim doesn't match in_dim, fix by linear proj
     if feats.shape[1] != in_dim:
-        print(
-            f"[WARN] SBERT feats {feats.shape[1]} != required in_dim {in_dim}. "
-            f"Projecting to in_dim."
-        )
+        print(f"[WARN] SBERT feats {feats.shape[1]} != required in_dim {in_dim}. Projecting to in_dim.")
         proj = nn.Linear(feats.shape[1], in_dim, bias=False)
         with torch.no_grad():
             feats = proj(feats)
