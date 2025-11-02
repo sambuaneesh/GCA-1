@@ -1,3 +1,8 @@
+ran process_dataset on `GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json` to get `GCA/Extract triples/processed/out_triplets_wiki.json`
+
+ran sample.py on `GCA/Extract triples/processed/out_triplets_wiki.json` to get `GCA/Extract triples/processed/output_samples_wiki.json`
+---
+
 ## Sensitivity Analysis of Weight and Threshold with Respect to Experimental Results
 The following tables show the effects of threshold/weight on different datasets. **The results show that the performance are not so sensitive to the threshold/weight**.
 

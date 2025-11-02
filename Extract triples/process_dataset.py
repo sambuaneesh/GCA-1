@@ -1,12 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from extract_triples import *
-from concurrent.futures import ThreadPoolExecutor,as_completed
 
-data_path = ''
-
-save_path = ''
+# data_path = "/home/stealthspectre/iiith/GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json"
+data_path = "/home/stealthspectre/iiith/GCA/Extract triples/dataset/PHD_benchmark.json"
 
 
-with open(data_path, "r", encoding='utf-8') as f:
+# save_path = "./out_triples_wiki.json"
+save_path = "./out_triples_phd.json"
+
+
+with open(data_path, "r", encoding="utf-8") as f:
     content = f.read()
 dataset = json.loads(content)
 
@@ -28,30 +32,35 @@ dataset = json.loads(content)
 
 
 def storage_triples(dataset):
-    process_data=load_progress(save_path)
-    current_data_length=len(process_data)
-    new_dataset=[]
+    process_data = load_progress(save_path)
+    current_data_length = len(process_data)
+    new_dataset = []
+    # for entry in dataset[current_data_length:]:
+    #     print(entry.items())
     with ThreadPoolExecutor(max_workers=20) as executor:
-        entry_futures = {executor.submit(init_triples_response,entry["AI"]):entry for entry in dataset[current_data_length:]}
+        entry_futures = {
+            executor.submit(init_triples_response, entry.get("gpt3_text") or entry.get("AI")): entry
+            for entry in dataset[current_data_length:]
+        }
         for future in as_completed(entry_futures):
             response = future.result()
             entry = entry_futures[future]
-            revise_response = update_triples_response(entry["gpt3_text"], response)
+            revise_response = update_triples_response(entry.get("gpt3_text") or entry.get("AI"), response)
             print(revise_response)
-            triples=process_triples_response(revise_response)
-            new_entry={
-                "entity":entry["entity"],
-                "gpt3_text": entry["gpt3_text"],
-                "label":entry["label"],
-                "triples":triples
+            triples = process_triples_response(revise_response)
+            new_entry = {
+                "entity": entry["entity"],
+                "gpt3_text": entry.get("gpt3_text") or entry.get("AI"),
+                "label": entry["label"],
+                "triples": triples,
             }
-            print(len(new_entry['triples']))
+            print(len(new_entry["triples"]))
             print(new_entry)
             new_dataset.append(new_entry)
-            save_data(new_dataset,save_path)
+            save_data(new_dataset, save_path)
     return new_dataset
 
-if __name__ == "__main__":
-    init_dataset=dataset
-    new_dataset=storage_triples(init_dataset)
 
+if __name__ == "__main__":
+    init_dataset = dataset
+    new_dataset = storage_triples(init_dataset)
