@@ -1,6 +1,13 @@
-ran process_dataset on `GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json` to get `GCA/Extract triples/processed/out_triplets_wiki.json`
+ran extract_triples/process_dataset.py on `GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json` to get `GCA/Extract triples/processed/out_triplets_wiki.json`
 
-ran sample.py on `GCA/Extract triples/processed/out_triplets_wiki.json` to get `GCA/Extract triples/processed/output_samples_wiki.json`
+ran Reverse Verification of Triples/compare triples/sample.py on `GCA/Extract triples/processed/out_triplets_wiki.json` to get `GCA/Extract triples/processed/output_samples_wiki.json`
+
+ran Reverse Verification of Triples/compare triples/gpt4_compare.py on `GCA/Extract triples/processed/output_samples_wiki.json` to get `GCA/Extract triples/processed/out_supports_wiki.json`
+
+ran Reverse Verification of Triples/compare triples/fact_triples.py on `GCA/Extract triples/processed/out_supports_wiki.json` to add fact_triples on the same file
+
+ran Reverse Verification of Triples/mask_relationship.py on `GCA/Extract triples/processed/out_supports_wiki.json` to get `GCA/Extract triples/processed/out_rr_wiki.json`
+
 ---
 
 ## Sensitivity Analysis of Weight and Threshold with Respect to Experimental Results
