@@ -7,10 +7,10 @@
 | `Reverse Verification of Triples/compare triples/gpt4_compare.py` | `GCA/Extract triples/processed/out_samples_wiki.json` | `GCA/Extract triples/processed/out_supports_wiki_rr.json` | Verifies triplets of main text based on entailment from triplets of samples. |
 | `Reverse Verification of Triples/compare triples/fact_triples.py` | `GCA/Extract triples/processed/out_supports_wiki_rr.json` | Same file (in-place modification) | Marks triplets of main text as facts based on entailment. |
 | `Reverse Verification of Triples/mask_relationship.py` | `GCA/Extract triples/processed/out_supports_wiki.json` | `GCA/Extract triples/processed/out_mask_wiki_rr.json` | Reverse verification of all the triplets of main text. |
-| `Graph-based Contextual Consistency Comparison/extract_nodes&edges.py` | `GCA/Extract triples/processed/out_samples_wiki.json` | `GCA/Extract triples/processed/graphs_wiki.json` | Builds the graph using the triplets. |
+| `Graph-based Contextual Consistency Comparison/extract_nodes&edges.py` | `GCA/Extract triples/processed/out_triplets_wiki.json` | `GCA/Extract triples/processed/graphs_wiki.json` | Builds the graph using the triplets. |
 | `rgcn_training/prepare_dgl_graphs.py` | `GCA/Extract triples/processed/graphs_wiki.json` | `data/relation2id_wiki.json`, `data/dgl_graphs_wiki/` | Generates relation mapping and DGL files. |
 | `rgcn_training/train_gca_rgcn.py` | `GCA/rgcn_training/data/dgl_graphs_wiki/` | `GCA/checkpoints/gca_rgcn_wiki.ckpt` | Trains the RGCN for the Wikibio dataset. |
-| `Graph-based Contextual Consistency Comparison/score_with_rgcn.py` | `GCA/Extract triples/processed/graphs_wiki.json` | `GCA/Extract triples/processed/scored_wiki.json` | Calculates the final score for each triplet of main text. |
+| `Graph-based Contextual Consistency Comparison/score_with_rgcn.py` | `GCA/Extract triples/processed/graphs_wiki.json`, `data/relation2id_wiki.json`, `GCA/checkpoints/gca_rgcn_wiki.ckpt` | `GCA/Extract triples/processed/scored_wiki.json` | Calculates the final score for each triplet of main text. |
 | `wikiBio/cal_metric_gca.py` | `GCA/Extract triples/processed/scored_wiki.json` | - | Calculates the classification metrics for different thresholds on the final score. |
 
 ---
