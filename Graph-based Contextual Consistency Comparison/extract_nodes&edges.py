@@ -1,5 +1,5 @@
 # set the paths you described
-data_path = "/home/stealthspectre/iiith/GCA/Extract triples/processed/out_supports_wiki.json"
+data_path = "/home/stealthspectre/iiith/GCA/Extract triples/processed/out_samples_wiki.json"
 save_path = "/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json"
 
 import json

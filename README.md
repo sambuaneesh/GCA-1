@@ -1,47 +1,18 @@
-ran extract_triples/process_dataset.py on `GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json` to get `GCA/Extract triples/processed/out_triplets_wiki.json`
+## Pipeline Execution Steps
 
-ran Reverse Verification of Triples/compare triples/sample.py on `GCA/Extract triples/processed/out_triplets_wiki.json` to get `GCA/Extract triples/processed/output_samples_wiki.json`
+| Script Name | Input File | Output File | Additional Details |
+|-------------|------------|-------------|-------------------|
+| `GCA/Extract triples/process_dataset.py` | `GCA/Extract triples/dataset/WikiBio_dataset/wikibio.json` | `GCA/Extract triples/processed/out_triplets_wiki.json` | Extracts triples from main text. |
+| `Reverse Verification of Triples/compare triples/sample.py` | `GCA/Extract triples/processed/out_triplets_wiki.json` | `GCA/Extract triples/processed/out_samples_wiki.json` | Extracts triples from samples. |
+| `Reverse Verification of Triples/compare triples/gpt4_compare.py` | `GCA/Extract triples/processed/out_samples_wiki.json` | `GCA/Extract triples/processed/out_supports_wiki_rr.json` | Verifies triplets of main text based on entailment from triplets of samples. |
+| `Reverse Verification of Triples/compare triples/fact_triples.py` | `GCA/Extract triples/processed/out_supports_wiki_rr.json` | Same file (in-place modification) | Marks triplets of main text as facts based on entailment. |
+| `Reverse Verification of Triples/mask_relationship.py` | `GCA/Extract triples/processed/out_supports_wiki.json` | `GCA/Extract triples/processed/out_mask_wiki_rr.json` | Reverse verification of all the triplets of main text. |
+| `Graph-based Contextual Consistency Comparison/extract_nodes&edges.py` | `GCA/Extract triples/processed/out_samples_wiki.json` | `GCA/Extract triples/processed/graphs_wiki.json` | Builds the graph using the triplets. |
+| `rgcn_training/prepare_dgl_graphs.py` | `GCA/Extract triples/processed/graphs_wiki.json` | `data/relation2id_wiki.json`, `data/dgl_graphs_wiki/` | Generates relation mapping and DGL files. |
+| `rgcn_training/train_gca_rgcn.py` | `GCA/rgcn_training/data/dgl_graphs_wiki/` | `GCA/checkpoints/gca_rgcn_wiki.ckpt` | Trains the RGCN for the Wikibio dataset. |
+| `Graph-based Contextual Consistency Comparison/score_with_rgcn.py` | `GCA/Extract triples/processed/graphs_wiki.json` | `GCA/Extract triples/processed/scored_wiki.json` | Calculates the final score for each triplet of main text. |
+| `wikiBio/cal_metric_gca.py` | `GCA/Extract triples/processed/scored_wiki.json` | - | Calculates the classification metrics for different thresholds on the final score. |
 
-ran Reverse Verification of Triples/compare triples/gpt4_compare.py on `GCA/Extract triples/processed/output_samples_wiki.json` to get `GCA/Extract triples/processed/out_supports_wiki.json`
-
-ran Reverse Verification of Triples/compare triples/fact_triples.py on `GCA/Extract triples/processed/out_supports_wiki.json` to add fact_triples on the same file
-
-ran Reverse Verification of Triples/mask_relationship.py on `GCA/Extract triples/processed/out_supports_wiki.json` to get `GCA/Extract triples/processed/out_rr_wiki.json`
-
-built the graph with Graph-based Contextual Consistency Comparison/extract_nodes&edges.py to get `/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json`
-
-to run "Graph-based Contextual Consistency Comparison/score_with_rgcn.py" we needed .ckpt file and relation2id.json file these are the steps we followed  
-python rgcn_training/prepare_dgl_graphs.py
-This will:
-    Create a data/ folder if it doesn't exist.
-    Generate data/relation2id_wiki.json. This is the file you were missing!
-    Create a folder data/dgl_graphs_wiki/ filled with .dgl files, one for each entry in your dataset.
-and then we trained the model using
-uv run train_gca_rgcn.py \
-    --data-dir /home/stealthspectre/iiith/GCA/rgcn_training/data/dgl_graphs_wiki \
-    --checkpoint-out /home/stealthspectre/iiith/GCA/checkpoints/gca_rgcn_wiki.ckpt \
-    --epochs 1 \
-    --batch-size 8 \
-    --h-dim 256 \
-    --out-dim 256 \
-    --num-layers 2 \
-    --lr 0.001 \
-    --dropout 0.1 \
-    --self-loop \
-    --device cuda
-(temporarily we set --num-bases 100 so that it can run locally in our system) (TODO: to run with all relations)
-
-with the files we got then we run
-python "Graph-based Contextual Consistency Comparison/score_with_rgcn.py" \
-  --ckpt "/home/stealthspectre/iiith/GCA/checkpoints/gca_rgcn_wiki.ckpt" \
-  --relation-map "/home/stealthspectre/iiith/GCA/rgcn_training/data/relation2id_wiki.json" \
-  --input "/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json" \
-  --output "/home/stealthspectre/iiith/GCA/Extract triples/processed/scored_wiki.json" \
-  --device cuda \
-  --sbert-model "sentence-transformers/all-MiniLM-L6-v2"
-  
-
-  
 ---
 
 ## Sensitivity Analysis of Weight and Threshold with Respect to Experimental Results

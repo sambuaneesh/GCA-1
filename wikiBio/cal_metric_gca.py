@@ -85,8 +85,7 @@ def main():
     print(f"\nScore statistics: Mean (μ) = {mu:.4f}, Std Dev (σ) = {sigma:.4f}")
 
     # 3. Sweep through different thresholds (μ + k·σ)
-    print("\n--- Evaluating at different thresholds (Threshold = μ - k·σ) ---")
-    print("Note: A sample is classified as a hallucination if its score is BELOW the threshold.")
+    print("--- Evaluating at different thresholds (Threshold = μ - k·σ) ---")
 
     best_f1 = -1
     best_metrics = {}
