@@ -33,6 +33,10 @@ except Exception:
 # Model (matches the trainer)
 # ----------------------------
 class GCARGCN(nn.Module):
+    """
+    Relation-aware GCN from the training script.
+    """
+
     def __init__(
         self,
         in_dim: int,
@@ -41,43 +45,57 @@ class GCARGCN(nn.Module):
         num_rels: int,
         num_layers: int = 2,
         num_bases: int = -1,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         self_loop: bool = True,
     ):
         super().__init__()
+        assert num_layers >= 2, "num_layers must be >= 2"
+        if num_bases == -1 or num_bases > num_rels:
+            num_bases = num_rels
+
         self.in_dim = in_dim
         self.h_dim = h_dim
         self.out_dim = out_dim
         self.num_rels = num_rels
         self.num_layers = num_layers
         self.num_bases = num_bases
-        self.self_loop = self_loop
-
-        h_dims = [in_dim] + [h_dim] * (num_layers - 1) + [out_dim]
-        self.layers = nn.ModuleList()
         self.dropout = nn.Dropout(dropout)
 
+        # Project input features if in_dim doesn't match h_dim
+        self.in_proj = nn.Linear(in_dim, h_dim) if in_dim != h_dim else None
+
+        layers = []
         for i in range(num_layers):
-            in_c = h_dims[i]
-            out_c = h_dims[i + 1]
+            in_c = h_dim
+            out_c = out_dim if i == num_layers - 1 else h_dim
             act = nn.ReLU() if i < num_layers - 1 else None
+
+            # In the training script, dropout is applied outside the layer.
+            # The original scoring script had it inside. We match the training script.
             layer = RelGraphConv(
                 in_feat=in_c,
                 out_feat=out_c,
                 num_rels=num_rels,
-                regularizer="basis" if num_bases and num_bases > 0 else "none",
-                num_bases=num_bases if num_bases and num_bases > 0 else None,
+                regularizer="basis",
+                num_bases=num_bases,
                 self_loop=self_loop,
                 activation=act,
-                dropout=dropout,
+                dropout=0.0,  # Dropout is applied externally in the forward pass
             )
-            self.layers.append(layer)
+            layers.append(layer)
+
+        self.layers = nn.ModuleList(layers)
 
     def forward(self, g: dgl.DGLGraph, feats: torch.Tensor) -> torch.Tensor:
-        h = feats
-        etype = g.edata[dgl.ETYPE]
+        # Ensure norm exists. The scoring function now does this, but it's safe to have here too.
+        if "norm" not in g.edata:
+            g.edata["norm"] = dgl.norm_by_dst(g).unsqueeze(1)
+
+        h = self.in_proj(feats) if self.in_proj is not None else feats
+
         for i, layer in enumerate(self.layers):
-            h = layer(g, h, etype)
+            # Pass the edge type and the norm tensor
+            h = layer(g, h, g.edata[dgl.ETYPE], g.edata["norm"])
             if i < len(self.layers) - 1:
                 h = self.dropout(h)
         return h
@@ -85,31 +103,39 @@ class GCARGCN(nn.Module):
 
 class GraphLinkPredict(nn.Module):
     """
-    DistMult-style link predictor over the encoder's output.
+    Link-prediction head from the training script.
+    Uses `w_relation` parameter name.
     """
 
-    def __init__(self, encoder: GCARGCN):
+    def __init__(self, encoder: GCARGCN, reg_param: float = 0.01):
         super().__init__()
         self.encoder = encoder
-        self.rel = nn.Parameter(torch.empty(encoder.num_rels, encoder.out_dim))
-        nn.init.xavier_uniform_(self.rel)
+        self.reg_param = reg_param
+        # This parameter name MUST match the checkpoint
+        self.w_relation = nn.Parameter(torch.Tensor(encoder.num_rels, encoder.out_dim))
+        nn.init.xavier_uniform_(self.w_relation, gain=nn.init.calculate_gain("relu"))
 
-    def forward(self, g: dgl.DGLGraph, feats: torch.Tensor) -> torch.Tensor:
-        return self.encoder(g, feats)
+    def forward(self, g, node_feats):
+        return self.encoder(g, node_feats)
 
-    def calc_score(self, node_emb: torch.Tensor, triplets: torch.Tensor) -> torch.Tensor:
+    def calc_score(self, embedding: torch.Tensor, triplets: torch.Tensor) -> torch.Tensor:
         """
         triplets: LongTensor [B, 3] with (head_idx, rel_id, tail_idx)
         returns logits (pre-sigmoid) [B]
         """
-        s = node_emb[triplets[:, 0]]
-        r = self.rel[triplets[:, 1]]
-        o = node_emb[triplets[:, 2]]
+        s = embedding[triplets[:, 0]]
+        r = self.w_relation[triplets[:, 1]]
+        o = embedding[triplets[:, 2]]
         return torch.sum(s * r * o, dim=1)
 
-    def get_loss(self, node_emb: torch.Tensor, samples: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        logits = self.calc_score(node_emb, samples)
-        return nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
+    def get_loss(self, embedding: torch.Tensor, triplets: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        score = self.calc_score(embedding, triplets)
+        predict_loss = nn.functional.binary_cross_entropy_with_logits(score, labels)
+        reg_loss = self.regularization_loss(embedding)
+        return predict_loss + self.reg_param * reg_loss
+
+    def regularization_loss(self, embedding: torch.Tensor) -> torch.Tensor:
+        return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
 
 # --------------------------------------
@@ -218,40 +244,34 @@ def _infer_dims_from_state(state_dict):
     return in_dim, h_dim, out_dim, num_rels, num_layers
 
 
-def load_pretrained_predictor(ckpt_path: str, device: torch.device) -> GraphLinkPredict:
-    ckpt = torch.load(ckpt_path, map_location=device)
-
+def load_pretrained_predictor(
+    ckpt_path: str,
+    device: torch.device,
+) -> GraphLinkPredict:
+    """
+    Load GraphLinkPredict + GCARGCN from a checkpoint produced by train_gca_rgcn.py
+    """
+    # This warning is fine since we created the file
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if "state_dict" not in ckpt:
-        raise ValueError(f"Checkpoint at {ckpt_path} missing 'state_dict'")
+        raise ValueError(f"Checkpoint at {ckpt_path} missing 'state_dict' key")
 
-    state = ckpt["state_dict"]
-
-    # Prefer inferring dims from weights; fall back to metadata if needed
-    try:
-        in_dim_s, h_dim_s, out_dim_s, num_rels_s, num_layers_s = _infer_dims_from_state(state)
-        in_dim = in_dim_s
-        h_dim = h_dim_s
-        out_dim = out_dim_s
-        num_rels = int(ckpt.get("num_rels", num_rels_s))
-        num_layers = int(ckpt.get("num_layers", num_layers_s))
-    except Exception as e:
-        print(f"[WARN] dim inference failed ({e}); using ckpt metadata.")
-        in_dim = int(ckpt["in_dim"])
-        h_dim = int(ckpt["h_dim"])
-        out_dim = int(ckpt["out_dim"])
-        num_rels = int(ckpt["num_rels"])
-        num_layers = int(ckpt["num_layers"])
-
-    num_bases = int(ckpt.get("num_bases", -1))
-    dropout = float(ckpt.get("dropout", 0.1))
+    # Reconstruct encoder using metadata from checkpoint
+    in_dim = int(ckpt.get("in_dim", 384))  # Default to SBERT dim if not saved
+    h_dim = int(ckpt["h_dim"])
+    out_dim = int(ckpt["out_dim"])
+    num_rels = int(ckpt["num_rels"])
+    num_layers = int(ckpt["num_layers"])
+    num_bases = int(ckpt["num_bases"])
+    dropout = float(ckpt["dropout"])
     self_loop = bool(ckpt.get("self_loop", True))
 
     print(
-        f"[RGCN] Using dims from weights: in={in_dim}, h={h_dim}, out={out_dim}, "
+        f"[RGCN] Using dims from checkpoint: in={in_dim}, h={h_dim}, out={out_dim}, "
         f"num_rels={num_rels}, num_layers={num_layers}, num_bases={num_bases}"
     )
 
-    enc = GCARGCN(
+    encoder = GCARGCN(
         in_dim=in_dim,
         h_dim=h_dim,
         out_dim=out_dim,
@@ -262,11 +282,14 @@ def load_pretrained_predictor(ckpt_path: str, device: torch.device) -> GraphLink
         self_loop=self_loop,
     ).to(device)
 
-    model = GraphLinkPredict(enc).to(device)
+    model = GraphLinkPredict(encoder).to(device)
 
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    # Load the state dict. It should now match perfectly.
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=True)
     if missing or unexpected:
+        # This should not happen now, but it's good practice to keep the check
         print(f"[WARN] load_state_dict: missing={missing}, unexpected={unexpected}")
+
     model.eval()
     return model
 
@@ -279,35 +302,47 @@ def score_triples_with_checkpoint(
     nodes: List[str],
     triples: List[Tuple[str, str, str]],
     sbert_model: Optional[str] = "sentence-transformers/all-MiniLM-L6-v2",
-    force_feat_dim: Optional[int] = None,
+    force_feat_dim: Optional[int] = None,  # This argument is now less important
     device_str: str = "cuda",
 ) -> List[float]:
     """
     Convenience API: score a list of (h, r, t) triples given node strings.
-
     Returns a list of raw logits (higher => more plausible).
     """
     device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+
+    # --- MODIFIED PART ---
+    # First, peek into the checkpoint to get the correct in_dim
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    in_dim = int(ckpt.get("in_dim", 384))  # Get in_dim from checkpoint
+
+    # Now load the full model onto the target device
     predictor = load_pretrained_predictor(ckpt_path, device)
+    # --- END MODIFIED PART ---
+
     rel2id = load_relation_map(relation_map_path)
 
-    # Prepare node features (must match checkpoint in_dim)
-    in_dim = int(force_feat_dim or predictor.encoder.in_dim)
-    featurer = TextFeaturer(sbert_model, in_dim)
+    # Prepare node features
+    featurer = TextFeaturer(sbert_model, in_dim)  # Use the correct in_dim for the featurer
     feats = featurer.encode(nodes)
 
-    # If SBERT dim doesn't match in_dim, fix by linear proj
+    # This check is now slightly redundant but harmless.
+    # The projection layer inside GCARGCN will handle the mismatch.
     if feats.shape[1] != in_dim:
-        print(f"[WARN] SBERT feats {feats.shape[1]} != required in_dim {in_dim}. Projecting to in_dim.")
-        proj = nn.Linear(feats.shape[1], in_dim, bias=False)
-        with torch.no_grad():
-            feats = proj(feats)
+        print(
+            f"[WARN] SBERT feats {feats.shape[1]} != required in_dim {in_dim}. "
+            f"The model's projection layer will handle this."
+        )
 
     # Build graph + score
     g, _, feat_t, tri_idx = build_dgl_from_triples(nodes, triples, rel2id, feats)
     g = g.to(device)
     feat_t = feat_t.to(device)
     tri_idx = tri_idx.to(device)
+
+    # Ensure norm is present before passing to the model
+    if "norm" not in g.edata:
+        g.edata["norm"] = dgl.norm_by_dst(g).unsqueeze(1)
 
     node_emb = predictor(g, feat_t)
     logits = predictor.calc_score(node_emb, tri_idx)

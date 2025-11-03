@@ -8,6 +8,40 @@ ran Reverse Verification of Triples/compare triples/fact_triples.py on `GCA/Extr
 
 ran Reverse Verification of Triples/mask_relationship.py on `GCA/Extract triples/processed/out_supports_wiki.json` to get `GCA/Extract triples/processed/out_rr_wiki.json`
 
+built the graph with Graph-based Contextual Consistency Comparison/extract_nodes&edges.py to get `/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json`
+
+to run "Graph-based Contextual Consistency Comparison/score_with_rgcn.py" we needed .ckpt file and relation2id.json file these are the steps we followed  
+python rgcn_training/prepare_dgl_graphs.py
+This will:
+    Create a data/ folder if it doesn't exist.
+    Generate data/relation2id_wiki.json. This is the file you were missing!
+    Create a folder data/dgl_graphs_wiki/ filled with .dgl files, one for each entry in your dataset.
+and then we trained the model using
+uv run train_gca_rgcn.py \
+    --data-dir /home/stealthspectre/iiith/GCA/rgcn_training/data/dgl_graphs_wiki \
+    --checkpoint-out /home/stealthspectre/iiith/GCA/checkpoints/gca_rgcn_wiki.ckpt \
+    --epochs 1 \
+    --batch-size 8 \
+    --h-dim 256 \
+    --out-dim 256 \
+    --num-layers 2 \
+    --lr 0.001 \
+    --dropout 0.1 \
+    --self-loop \
+    --device cuda
+(temporarily we set --num-bases 100 so that it can run locally in our system) (TODO: to run with all relations)
+
+with the files we got then we run
+python "Graph-based Contextual Consistency Comparison/score_with_rgcn.py" \
+  --ckpt "/home/stealthspectre/iiith/GCA/checkpoints/gca_rgcn_wiki.ckpt" \
+  --relation-map "/home/stealthspectre/iiith/GCA/rgcn_training/data/relation2id_wiki.json" \
+  --input "/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json" \
+  --output "/home/stealthspectre/iiith/GCA/Extract triples/processed/scored_wiki.json" \
+  --device cuda \
+  --sbert-model "sentence-transformers/all-MiniLM-L6-v2"
+  
+
+  
 ---
 
 ## Sensitivity Analysis of Weight and Threshold with Respect to Experimental Results

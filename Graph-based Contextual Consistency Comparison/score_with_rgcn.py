@@ -71,9 +71,29 @@ def score_repo_extracted(
     data: List[Dict[str, Any]], ckpt: str, relmap: str, device: str, sbert_model: str
 ) -> List[Dict[str, Any]]:
     out = []
-    for entry in data:
+    # Use tqdm to see progress
+    from tqdm import tqdm
+
+    for entry in tqdm(data, desc="Scoring graphs"):
+        # --- ADD THIS CHECK ---
+        if not entry.get("sample0") or not entry["sample0"].get("nodes"):
+            print("Skipping entry with no nodes in sample0.")
+            entry["triples_score"] = []  # Add empty score list
+            out.append(entry)
+            continue
+        # --- END OF ADDED CHECK ---
+
         nodes = entry["sample0"]["nodes"]
         graph = _as_triples_list(entry["sample0"]["graph"])
+
+        # --- ADD THIS CHECK for empty graph ---
+        if not graph:
+            print("Skipping entry with no triples in sample0 graph.")
+            entry["triples_score"] = []
+            out.append(entry)
+            continue
+        # --- END OF ADDED CHECK ---
+
         scores = score_triples_with_checkpoint(
             ckpt_path=ckpt,
             relation_map_path=relmap,
@@ -108,17 +128,13 @@ def score_simple(
 
 def main():
     ap = argparse.ArgumentParser("Score triples with pretrained GCA RGCN")
-    ap.add_argument(
-        "--ckpt", required=True, help="Path to gca_rgcn.ckpt produced by training"
-    )
+    ap.add_argument("--ckpt", required=True, help="Path to gca_rgcn.ckpt produced by training")
     ap.add_argument(
         "--relation-map",
         required=True,
         help="Path to relation2id.json used at train time",
     )
-    ap.add_argument(
-        "--input", required=True, help="Input JSON file (see header for formats)"
-    )
+    ap.add_argument("--input", required=True, help="Input JSON file (see header for formats)")
     ap.add_argument("--output", required=True, help="Where to write augmented JSON")
     ap.add_argument("--device", default="cuda")
     ap.add_argument(
@@ -132,13 +148,9 @@ def main():
         data = json.load(f)
 
     if _is_repo_extracted_format(data):
-        scored = score_repo_extracted(
-            data, args.ckpt, args.relation_map, args.device, args.sbert_model
-        )
+        scored = score_repo_extracted(data, args.ckpt, args.relation_map, args.device, args.sbert_model)
     else:
-        scored = score_simple(
-            data, args.ckpt, args.relation_map, args.device, args.sbert_model
-        )
+        scored = score_simple(data, args.ckpt, args.relation_map, args.device, args.sbert_model)
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(scored, f, ensure_ascii=False, indent=2)

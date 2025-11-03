@@ -67,3 +67,4 @@ Desktop.ini
 *.swp
 
 *.ckpt
+rgcn_training/data/
