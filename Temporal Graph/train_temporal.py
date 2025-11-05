@@ -56,7 +56,7 @@ def main():
     ap.add_argument("--graphs", default="processed/dgl_temporal")
     ap.add_argument("--epochs", type=int, default=15)
     ap.add_argument("--batch-size", type=int, default=16)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--checkpoint", default="processed/temporal_entity_ckpt.pt")
@@ -125,18 +125,22 @@ def main():
         # ---- validate ----
         model.eval()
         all_y, all_pred = [], []
+        val_loss = 0.0
         with torch.no_grad():
             for bg, y in val_loader:
                 bg = bg.to(device)
+                y = y.to(device)
                 logits = model(bg)
+                loss = loss_fn(logits, y)
+                val_loss += loss.item()
                 pred = logits.argmax(dim=-1).cpu()
                 all_pred.extend(pred.tolist())
-                all_y.extend(y.tolist())
+                all_y.extend(y.cpu().tolist())
         acc = accuracy_score(all_y, all_pred) if all_y else 0.0
         f1 = f1_score(all_y, all_pred, average="macro") if all_y else 0.0
 
         print(
-            f"Epoch {epoch:03d} | train loss {total_loss / max(1, len(train_loader)):.4f} | val acc {acc:.4f} | val macro-F1 {f1:.4f}"
+            f"Epoch {epoch:03d} | train loss {total_loss / max(1, len(train_loader)):.4f} | val loss {val_loss / max(1, len(val_loader)):.4f} | val acc {acc:.4f} | val macro-F1 {f1:.4f}"
         )
 
         if f1 > best_f1:
