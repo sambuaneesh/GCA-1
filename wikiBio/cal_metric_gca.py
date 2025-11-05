@@ -7,7 +7,8 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 
 # --- Configuration ---
 # This is the output file from your score_with_rgcn.py run
-SCORED_DATA_PATH = "/home/stealthspectre/iiith/GCA/Extract triples/processed/scored_wiki.json"
+suffix = "diahalu"
+SCORED_DATA_PATH = f"/home/stealthspectre/iiith/GCA/Extract triples/processed/scored_{suffix}.json"
 
 
 def calculate_passage_scores(scored_data):

@@ -68,3 +68,5 @@ Desktop.ini
 
 *.ckpt
 rgcn_training/data/
+
+dgl_temporal/

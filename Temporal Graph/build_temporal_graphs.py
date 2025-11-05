@@ -1,0 +1,200 @@
+# coding: utf-8
+"""
+Build per-dialogue DGL graphs from diahalu_temporal.json.
+
+- Node: each sentence in "dialogues" (encoded by a sentence encoder)
+- Temporal edges: directed (i -> i+1) with edge_type = 0 and zero edge embedding
+- Entity edges: undirected (i <-> j) for every shared entity; edge_type = 1; edge embedding = encoder(entity)
+- Saves graphs to Temporal Graph/processed/dgl_temporal/*.dgl
+- Also writes a label map for the 6-way classifier.
+
+Usage:
+  python build_temporal_graphs.py \
+      --input processed/diahalu_temporal.json \
+      --outdir processed/dgl_temporal \
+      --encoder sentence-transformers/all-MiniLM-L6-v2
+"""
+
+import argparse
+import json
+import os
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import dgl
+import torch
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+
+
+def _encode_batch(embedder, texts: List[str], device: str = "cpu") -> torch.Tensor:
+    with torch.no_grad():
+        v = embedder.encode(
+            texts,
+            convert_to_tensor=True,
+            normalize_embeddings=True,
+            device=device if torch.cuda.is_available() else "cpu",
+        )
+    return v.cpu().float()
+
+
+def _pairs(indices: List[int]) -> List[Tuple[int, int]]:
+    # all unordered pairs (i, j), i < j
+    out = []
+    n = len(indices)
+    for a in range(n):
+        for b in range(a + 1, n):
+            out.append((indices[a], indices[b]))
+    return out
+
+
+def build_graph_for_item(
+    dialogues: List[str],
+    entities_per_turn: List[List[str]],
+    sent_embedder,
+    ent_embedder,
+    feat_dim: int,
+) -> dgl.DGLGraph:
+    N = len(dialogues)
+
+    # --- Node features (sentence embeddings) ---
+    node_feats = _encode_batch(sent_embedder, dialogues)
+    assert node_feats.shape[0] == N
+
+    # --- Edge construction ---
+    src, dst = [], []
+    e_types = []  # 0 = TEMP, 1 = ENTITY
+    e_feats = []  # edge embedding (entity emb or zeros)
+
+    zero_edge = torch.zeros(feat_dim)  # for temporal edges
+
+    # TEMPORAL: i -> i+1
+    for i in range(N - 1):
+        src.append(i)
+        dst.append(i + 1)
+        e_types.append(0)
+        e_feats.append(zero_edge)
+
+    # ENTITY: undirected edges for every shared entity
+    ent2turns: Dict[str, List[int]] = defaultdict(list)
+    for i, ents in enumerate(entities_per_turn):
+        for e in ents:
+            if isinstance(e, str) and e.strip():
+                ent2turns[e.strip()].append(i)
+
+    # Pre-encode each unique entity once
+    uniq_entities = list(ent2turns.keys())
+    if len(uniq_entities) > 0:
+        ent_vecs = _encode_batch(ent_embedder, uniq_entities)
+        ent_vec_map = {e: ent_vecs[k] for k, e in enumerate(uniq_entities)}
+    else:
+        ent_vec_map = {}
+
+    for ent, turns in ent2turns.items():
+        if len(turns) < 2:
+            continue
+        for i, j in _pairs(turns):
+            v = ent_vec_map.get(ent, zero_edge)
+            # i <-> j (undirected implemented as two directed edges)
+            src.extend([i, j])
+            dst.extend([j, i])
+            e_types.extend([1, 1])
+            e_feats.extend([v, v])
+
+    if not src:
+        # ensure we at least have nodes; model can still pool
+        g = dgl.graph(([], []), num_nodes=N)
+    else:
+        g = dgl.graph((torch.tensor(src), torch.tensor(dst)), num_nodes=N)
+
+    g.ndata["feat"] = node_feats
+    g.edata["e_type"] = torch.tensor(e_types, dtype=torch.long) if len(e_types) else torch.empty(0, dtype=torch.long)
+    g.edata["e_feat"] = torch.stack(e_feats) if len(e_feats) else torch.empty(0, feat_dim)
+
+    return g
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", default="processed/diahalu_temporal.json")
+    ap.add_argument("--outdir", default="processed/dgl_temporal")
+    ap.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2")
+    args = ap.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embedder = SentenceTransformer(args.encoder, device=device)
+    feat_dim = embedder.get_sentence_embedding_dimension()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    with open(args.input, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # --- 1. Fixed label mapping (independent of data distribution) ---
+    # 6-way: factual + 5 error subtypes (last one is "non-factual" as unspecified subtype)
+    FIXED_LABEL_MAP = {
+        "factual": 0,
+        "Reasoning Error": 1,
+        "Incoherence": 2,
+        "Irrelevance": 3,
+        "Overreliance": 4,
+        "non-factual": 5,  # catch-all for unspecified subtype (e.g., type is [], missing, or literally "non-factual")
+    }
+    with open(outdir / "label_map.json", "w", encoding="utf-8") as f:
+        json.dump(FIXED_LABEL_MAP, f, indent=2, ensure_ascii=False)
+
+    # Save index with metadata to reproduce splits later
+    meta_records = []
+
+    # Build & save one graph per item
+    for idx, item in enumerate(tqdm(data, desc="Building graphs")):
+        dialogues: List[str] = item["dialogues"]
+        ents: List[List[str]] = item["entities"]
+        assert len(dialogues) == len(ents), f"dialogues/entities length mismatch at idx {idx}"
+
+        g = build_graph_for_item(dialogues, ents, embedder, embedder, feat_dim)
+
+        # graph label (single 6-way class; do NOT derive from counts)
+        if (item.get("label") or "").strip().lower() == "factual":
+            y = FIXED_LABEL_MAP["factual"]
+        else:
+            raw_t = item.get("type")
+            # Normalize the 'type' field:
+            # - if it's a list (e.g., []), missing, or empty string → treat as unspecified "non-factual"
+            if isinstance(raw_t, list) or raw_t is None or str(raw_t).strip() == "":
+                tnorm = "non-factual"
+            else:
+                tnorm = str(raw_t).strip()
+            # Map to fixed classes; anything unexpected goes to "non-factual" bucket (5)
+            y = FIXED_LABEL_MAP.get(tnorm, FIXED_LABEL_MAP["non-factual"])
+        g.ndata["y"] = torch.full(
+            (g.num_nodes(),), y, dtype=torch.long
+        )  # store label per node (same), handy for pooling
+
+        save_path = outdir / f"graph_{idx:05d}.dgl"
+        dgl.save_graphs(str(save_path), [g])
+
+        meta_records.append(
+            {
+                "idx": idx,
+                "y": y,
+                "label": item["label"],
+                "type": item.get("type"),
+                "domain": item.get("domain"),
+                "source": item.get("source"),
+                "LLM": item.get("LLM"),
+                "num_nodes": g.num_nodes(),
+                "num_edges": g.num_edges(),
+            }
+        )
+
+    with open(outdir / "index.json", "w", encoding="utf-8") as f:
+        json.dump(meta_records, f, indent=2, ensure_ascii=False)
+
+    print(f"✓ Wrote {len(meta_records)} graphs to {outdir}")
+
+
+if __name__ == "__main__":
+    main()
