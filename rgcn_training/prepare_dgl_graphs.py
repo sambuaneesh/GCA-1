@@ -8,9 +8,10 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 # --- Configuration ---
-INPUT_JSON_PATH = "/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json"
-OUTPUT_DGL_DIR = "/home/stealthspectre/iiith/GCA/rgcn_training/data/dgl_graphs_wiki"
-OUTPUT_REL_MAP_PATH = "/home/stealthspectre/iiith/GCA/rgcn_training/data/relation2id_wiki.json"
+suffix = "diahalu"
+INPUT_JSON_PATH = f"/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_{suffix}.json"
+OUTPUT_DGL_DIR = f"/home/stealthspectre/iiith/GCA/rgcn_training/data/dgl_graphs_{suffix}"
+OUTPUT_REL_MAP_PATH = f"/home/stealthspectre/iiith/GCA/rgcn_training/data/relation2id_{suffix}.json"
 SBERT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 

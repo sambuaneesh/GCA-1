@@ -91,6 +91,44 @@ def epoch_metrics(scores: torch.Tensor, labels: torch.Tensor, threshold: float =
     return acc, precision, recall, f1
 
 
+def evaluate(model, loader, neg_sampler, device):
+    """Evaluate model on a dataloader and return metrics."""
+    model.eval()
+    total_loss = 0.0
+    all_scores = []
+    all_labels = []
+    steps = 0
+
+    with torch.no_grad():
+        for batch_g in loader:
+            batch_g = batch_g.to(device)
+            feats = batch_g.ndata["feat"].to(device)
+            if "norm" not in batch_g.edata:
+                batch_g.edata["norm"] = dgl.norm_by_dst(batch_g).unsqueeze(1)
+
+            src, dst = batch_g.edges()
+            rel = batch_g.edata[dgl.ETYPE]
+            pos_triplets = torch.stack([src, rel, dst], dim=1).to(device)
+
+            samples, labels = neg_sampler.sample(pos_triplets, batch_g.num_nodes())
+
+            embed = model(batch_g, feats)
+            loss = model.get_loss(embed, samples, labels)
+            scores = model.calc_score(embed, samples)
+
+            all_scores.append(scores)
+            all_labels.append(labels)
+            total_loss += loss.item()
+            steps += 1
+
+    avg_loss = total_loss / max(steps, 1)
+    all_scores = torch.cat(all_scores, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    acc, prec, rec, f1 = epoch_metrics(all_scores, all_labels, threshold=0.5)
+
+    return avg_loss, acc, prec, rec, f1
+
+
 def main():
     ap = argparse.ArgumentParser(description="Train GCA-ready RGCN encoder (with edge-accuracy metrics)")
     ap.add_argument(
@@ -99,12 +137,12 @@ def main():
         required=True,
         help="Folder with per-response graphs (.dgl/.bin)",
     )
-    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--epochs", type=int, default=15)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--h-dim", type=int, default=256)
     ap.add_argument("--out-dim", type=int, default=256)
     ap.add_argument("--num-layers", type=int, default=2)
-    ap.add_argument("--num-bases", type=int, default=-1)
+    ap.add_argument("--num-bases", type=int, default=100)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--self-loop", action="store_true", help="Enable self-loop transform")
     ap.add_argument("--neg-k", type=int, default=10, help="Negatives per positive edge")
@@ -126,6 +164,7 @@ def main():
     ap.add_argument("--demo-nodes", type=int, default=40)
     ap.add_argument("--demo-rels", type=int, default=6)
     ap.add_argument("--demo-feat-dim", type=int, default=768)
+    ap.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio")
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -160,9 +199,19 @@ def main():
         num_rels = max(num_rels, int(g.edata[dgl.ETYPE].max().item()) + 1)
     print(f"Loaded {len(graphs)} graphs | in_dim={in_dim} | num_rels={num_rels}")
 
-    # Dataloader
-    dataset = GraphFolderDataset(graphs)
-    loader = GraphDataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    # Train/Val split
+    val_size = int(len(graphs) * args.val_split)
+    train_size = len(graphs) - val_size
+    train_graphs, val_graphs = torch.utils.data.random_split(
+        graphs, [train_size, val_size], generator=torch.Generator().manual_seed(42)
+    )
+    print(f"Train: {train_size} graphs | Val: {val_size} graphs")
+
+    # Dataloaders
+    train_dataset = GraphFolderDataset([graphs[i] for i in train_graphs.indices])
+    val_dataset = GraphFolderDataset([graphs[i] for i in val_graphs.indices])
+    train_loader = GraphDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = GraphDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     # Model + link-pred head
     encoder = GCARGCN(
@@ -180,9 +229,10 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     neg_sampler = NegativeSampler(k=args.neg_k)
 
-    best_loss = float("inf")
+    best_val_loss = float("inf")
 
     for epoch in range(args.epochs):
+        # Training phase
         model.train()
         total_loss = 0.0
         steps = 0
@@ -191,7 +241,7 @@ def main():
         all_scores = []
         all_labels = []
 
-        for batch_g in loader:
+        for batch_g in train_loader:
             batch_g = batch_g.to(device)
             feats = batch_g.ndata["feat"].to(device)
             if "norm" not in batch_g.edata:
@@ -220,18 +270,27 @@ def main():
             total_loss += loss.item()
             steps += 1
 
-        avg_loss = total_loss / max(steps, 1)
-        # compute epoch-level metrics
+        train_loss = total_loss / max(steps, 1)
+        # compute train metrics
         with torch.no_grad():
             all_scores = torch.cat(all_scores, dim=0)
             all_labels = torch.cat(all_labels, dim=0)
-            acc, prec, rec, f1 = epoch_metrics(all_scores, all_labels, threshold=0.5)
+            train_acc, train_prec, train_rec, train_f1 = epoch_metrics(all_scores, all_labels, threshold=0.5)
 
-        print(f"Epoch {epoch:03d} | loss {avg_loss:.4f} | acc {acc:.4f} | P {prec:.4f} | R {rec:.4f} | F1 {f1:.4f}")
+        # Validation phase
+        val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate(model, val_loader, neg_sampler, device)
 
-        # Save best checkpoint by loss
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        print(f"Epoch {epoch:03d}")
+        print(
+            f"  Train | loss {train_loss:.4f} | acc {train_acc:.4f} | P {train_prec:.4f} | R {train_rec:.4f} | F1 {train_f1:.4f}"
+        )
+        print(
+            f"  Val   | loss {val_loss:.4f} | acc {val_acc:.4f} | P {val_prec:.4f} | R {val_rec:.4f} | F1 {val_f1:.4f}"
+        )
+
+        # Save best checkpoint by validation loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             ckpt = {
                 "state_dict": model.state_dict(),
                 "epoch": epoch,

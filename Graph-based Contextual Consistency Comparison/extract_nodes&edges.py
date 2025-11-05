@@ -1,6 +1,7 @@
 # set the paths you described
-data_path = "/home/stealthspectre/iiith/GCA/Extract triples/processed/out_triplets_wiki.json"
-save_path = "/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_wiki.json"
+suffix = "diahalu"
+data_path = f"/home/stealthspectre/iiith/GCA/Extract triples/processed/out_triplets_{suffix}.json"
+save_path = f"/home/stealthspectre/iiith/GCA/Extract triples/processed/graphs_{suffix}.json"
 
 import json
 import re

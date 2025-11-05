@@ -5,10 +5,9 @@ import time
 import google.generativeai as genai
 
 # Configure Gemini API
+MODEL = "gemini-2.5-flash-lite"
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-client = genai.GenerativeModel("gemini-2.0-flash-lite")
-
-MODEL = "gemini-2.0-flash-lite"
+client = genai.GenerativeModel(MODEL)
 
 
 GPT_TRIPLE_EXTRACTION_PROMPT = """In the knowledge graph, knowledge triples are a basic data structure used to represent and store information, and each triple is an expression of a fact. Given a piece of text, please extract all knowledge triples contained in the text, and represent the triples in the form of ("head entity", "relationship", "tail entity").\
@@ -64,13 +63,12 @@ def request_api(prompt, model, temperature):
                 temperature=temperature,
                 max_output_tokens=500,
             )
-            response = client.generate_content(
-                prompt, generation_config=generation_config
-            )
+            response = client.generate_content(prompt, generation_config=generation_config)
             text_response = response.text.strip()
             flag = False
             return text_response
         except Exception as e:
+            print("Exception:", e)
             if "quota" in str(e).lower() or "rate" in str(e).lower():
                 print("Rate limit exceeded")
                 time.sleep(0.01)
