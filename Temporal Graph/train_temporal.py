@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import random
+from collections import Counter
 from pathlib import Path
 from typing import List
 
@@ -27,17 +28,17 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
+from torch.utils.data import WeightedRandomSampler
 
-SEED = 42
 
-
-def set_all_seeds(seed: int = SEED) -> None:
+def set_all_seeds(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    dgl.random.seed(seed)
 
 
 def _load_graphs(folder: str) -> List[dgl.DGLGraph]:
@@ -78,11 +79,21 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--checkpoint", default="Temporal Graph/processed/temporal_entity_ckpt.pt")
     ap.add_argument("--early-stop-patience", type=int, default=5, help="Early stopping patience (epochs)")
+    ap.add_argument(
+        "--sampling-scheme",
+        choices=["uniform6", "half_first"],
+        default="uniform6",
+        help=(
+            "Sampling weights: 'uniform6' gives 1/6 importance to each class (0..5); "
+            "'half_first' gives 1/2 to class 0 and spreads the rest equally over classes 1..5."
+        ),
+    )
     args = ap.parse_args()
 
-    set_all_seeds(SEED)
+    set_all_seeds(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with open(Path(args.graphs) / "label_map.json", "r", encoding="utf-8") as f:
@@ -99,7 +110,7 @@ def main():
     labels = [labels[i] for i in keep]
 
     n = len(graphs)
-    ggen = torch.Generator().manual_seed(SEED)
+    ggen = torch.Generator().manual_seed(args.seed)
     idx = torch.randperm(n, generator=ggen)
     n_train = int(n * 0.8)
     train_idx = idx[:n_train].tolist()
@@ -108,19 +119,28 @@ def main():
     train_ds = GraphDataset([graphs[i] for i in train_idx], [labels[i] for i in train_idx])
     val_ds = GraphDataset([graphs[i] for i in val_idx], [labels[i] for i in val_idx])
 
-    from collections import Counter
-
     counts = Counter([labels[i] for i in train_idx])
     num_classes = len(set(labels))
-    class_w = torch.ones(num_classes, dtype=torch.float)
+
+    loss_class_w = torch.ones(num_classes, dtype=torch.float)
     for c, cnt in counts.items():
-        class_w[c] = len(train_idx) / (num_classes * max(1, cnt))
-    class_w = class_w.to(device)
+        loss_class_w[c] = len(train_idx) / (num_classes * max(1, cnt))
+    loss_class_w = loss_class_w.to(device)
 
-    train_sample_weights = [class_w[labels[i]].item() for i in train_idx]
-    from torch.utils.data import WeightedRandomSampler
+    if args.sampling_scheme == "uniform6":
+        target_probs = torch.tensor([1.0 / 6.0] * 6, dtype=torch.float)
+    elif args.sampling_scheme == "half_first":
+        target_probs = torch.tensor([0.5] + [0.5 / 5.0] * 5, dtype=torch.float)
+    else:
+        raise ValueError(f"Unknown sampling scheme: {args.sampling_scheme}")
 
-    sampler = WeightedRandomSampler(train_sample_weights, num_samples=len(train_idx), replacement=True)
+    sample_w_per_class = torch.zeros(6, dtype=torch.float)
+    for c in range(6):
+        sample_w_per_class[c] = target_probs[c] / max(1, counts.get(c, 0))
+
+    train_sample_weights = [sample_w_per_class[labels[i]].item() for i in train_idx]
+
+    sampler = WeightedRandomSampler(train_sample_weights, num_samples=len(train_idx), replacement=True, generator=ggen)
 
     train_loader = GraphDataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, collate_fn=collate)
     val_loader = GraphDataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
@@ -133,12 +153,12 @@ def main():
     ).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    loss_fn = nn.CrossEntropyLoss(weight=class_w)
+    loss_fn = nn.CrossEntropyLoss(weight=loss_class_w)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, verbose=True)
 
     class_names = ["factual", "Reasoning Error", "Incoherence", "Irrelevance", "Overreliance", "non-factual"]
 
-    best_f1 = -1.0
+    best_acc = -1.0
     best_epoch = 0
     epochs_without_improvement = 0
 
@@ -193,9 +213,9 @@ def main():
         print(f"  6-way  | acc {acc_6way:.4f} | prec {prec_6way:.4f} | rec {rec_6way:.4f} | F1 {f1_6way:.4f}")
         print(f"  binary | acc {acc_binary:.4f} | prec {prec_binary:.4f} | rec {rec_binary:.4f} | F1 {f1_binary:.4f}")
 
-        sched.step(f1_6way)
-        if f1_6way > best_f1:
-            best_f1 = f1_6way
+        sched.step(acc_binary)
+        if acc_binary > best_acc:
+            best_acc = acc_binary
             best_epoch = epoch
             Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
             torch.save(
@@ -216,7 +236,7 @@ def main():
             print(f"  no improvement for {epochs_without_improvement} epoch(s)")
             if epochs_without_improvement >= args.early_stop_patience:
                 print(f"\nEarly stopping at epoch {epoch} (no improvement for {args.early_stop_patience} epochs)")
-                print(f"Best validation macro-F1: {best_f1:.4f}")
+                print(f"Best validation binary accuracy: {best_acc:.4f}")
                 break
 
     print("\n=== Evaluating best checkpoint on validation set ===")
@@ -237,6 +257,7 @@ def main():
             all_pred_best.extend(pred.tolist())
             all_y_best.extend(y.cpu().tolist())
 
+    class_names = ["factual", "Reasoning Error", "Incoherence", "Irrelevance", "Overreliance", "non-factual"]
     uniq_labels = sorted(set(all_y_best))
     target_names_6 = [class_names[i] if i < len(class_names) else f"class_{i}" for i in uniq_labels]
     report_6way = classification_report(
@@ -263,7 +284,7 @@ def main():
         digits=4,
     )
     print(report_binary)
-    print(f"Best macro-F1 on validation during training: {best_f1:.4f} at epoch {best_epoch}")
+    print(f"Best binary accuracy on validation during training: {best_acc:.4f} at epoch {best_epoch}")
 
 
 if __name__ == "__main__":

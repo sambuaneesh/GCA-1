@@ -214,7 +214,7 @@ def main():
     with open(outdir / "index.json", "w", encoding="utf-8") as f:
         json.dump(meta_records, f, indent=2, ensure_ascii=False)
 
-    print(f"✓ Wrote {len(meta_records)} graphs to {outdir}")
+    print(f"Wrote {len(meta_records)} graphs to {outdir}")
 
 
 if __name__ == "__main__":
