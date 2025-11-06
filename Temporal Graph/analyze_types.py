@@ -1,11 +1,9 @@
 import json
 from collections import Counter
 
-# Load the data
 with open("Temporal Graph/processed/diahalu_temporal.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
-# Extract all unique types
 types = set()
 type_counts = Counter()
 
@@ -15,7 +13,6 @@ for entry in data:
         types.add(type_value)
         type_counts[type_value] += 1
 
-# Print results
 print(f"Total samples: {len(data)}")
 print(f"\nUnique 'type' values found: {len(types)}")
 print("\nAll unique types:")

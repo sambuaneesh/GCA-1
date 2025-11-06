@@ -3,15 +3,15 @@
 Build per-dialogue DGL graphs from diahalu_temporal.json.
 
 - Node: each sentence in "dialogues" (encoded by a sentence encoder)
-- Temporal edges: directed (i -> i+1) with edge_type = 0 and zero edge embedding
-- Entity edges: undirected (i <-> j) for every shared entity; edge_type = 1; edge embedding = encoder(entity)
+- Temporal edges: directed (i -> i+1) + back edge (i+1 -> i), edge_type = 0, edge embedding = zeros
+- Entity edges: undirected (i <-> j) for every shared entity; edge_type = 1, edge embedding = zeros  <-- CHANGED
 - Saves graphs to Temporal Graph/processed/dgl_temporal/*.dgl
 - Also writes a label map for the 6-way classifier.
 
 Usage:
   python build_temporal_graphs.py \
-      --input processed/diahalu_temporal.json \
-      --outdir processed/dgl_temporal \
+      --input "Temporal Graph/processed/diahalu_temporal.json" \
+      --outdir "Temporal Graph/processed/dgl_temporal" \
       --encoder sentence-transformers/all-MiniLM-L6-v2
 """
 
@@ -64,21 +64,19 @@ def build_graph_for_item(
     dialogues: List[str],
     entities_per_turn: List[List[str]],
     sent_embedder,
-    ent_embedder,
+    ent_embedder,  # kept for signature compatibility; unused now that entity edges are zeroed
     feat_dim: int,
 ) -> dgl.DGLGraph:
     N = len(dialogues)
 
-    # --- Node features (sentence embeddings) ---
     node_feats = _encode_batch(sent_embedder, dialogues)
     assert node_feats.shape[0] == N
 
-    # --- Edge construction ---
     src, dst = [], []
     e_types = []  # 0 = TEMP, 1 = ENTITY
-    e_feats = []  # edge embedding (entity emb or zeros)
+    e_feats = []
 
-    zero_edge = torch.zeros(feat_dim)  # for temporal edges
+    zero_edge = torch.zeros(feat_dim)
 
     # TEMPORAL: undirected edges between i and i+1
     for i in range(N - 1):
@@ -86,13 +84,12 @@ def build_graph_for_item(
         dst.append(i + 1)
         e_types.append(0)
         e_feats.append(zero_edge)
-        # back edge
         src.append(i + 1)
         dst.append(i)
         e_types.append(0)
         e_feats.append(zero_edge)
 
-    # ENTITY: undirected edges for every shared entity
+    # ENTITY: undirected edges for every shared entity (now ZERO edge features)
     ent2turns: Dict[str, List[int]] = defaultdict(list)
     for i, ents in enumerate(entities_per_turn):
         turn_ents = set()
@@ -103,19 +100,12 @@ def build_graph_for_item(
         for ce in turn_ents:
             ent2turns[ce].append(i)
 
-    # Pre-encode each unique entity once
-    uniq_entities = list(ent2turns.keys())
-    if len(uniq_entities) > 0:
-        ent_vecs = _encode_batch(ent_embedder, uniq_entities)
-        ent_vec_map = {e: ent_vecs[k] for k, e in enumerate(uniq_entities)}
-    else:
-        ent_vec_map = {}
-
-    for ent, turns in ent2turns.items():
+    # No entity encoding step; we force zero vectors for entity edges as well
+    for _, turns in ent2turns.items():
         if len(turns) < 2:
             continue
         for i, j in _pairs(turns):
-            v = ent_vec_map.get(ent, zero_edge)
+            v = zero_edge
             src.extend([i, j])
             dst.extend([j, i])
             e_types.extend([1, 1])
@@ -181,6 +171,7 @@ def main():
             else:
                 tnorm = str(raw_t).strip()
             y = FIXED_LABEL_MAP.get(tnorm, FIXED_LABEL_MAP["non-factual"])
+
         g.ndata["y"] = torch.full((g.num_nodes(),), y, dtype=torch.long)
 
         save_path = outdir / f"graph_{idx:05d}.dgl"

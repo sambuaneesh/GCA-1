@@ -113,7 +113,7 @@ class TemporalEntityEncoder(nn.Module):
             nn.Linear(hidden_dim, num_classes),
         )
 
-    def forward(self, g: dgl.DGLGraph) -> torch.Tensor:
+    def forward(self, g: dgl.DGLGraph, output_attention: bool = False) -> torch.Tensor:
         """
         Forward pass for the TemporalEntityEncoder model.
 
@@ -145,4 +145,6 @@ class TemporalEntityEncoder(nn.Module):
 
         # Apply the classifier to the pooled features
         logits = self.cls(readout)  # Class logits for each graph in the batch
+        if output_attention:
+            return logits, attention_weights
         return logits

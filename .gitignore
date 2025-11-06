@@ -70,3 +70,4 @@ Desktop.ini
 rgcn_training/data/
 
 dgl_temporal/
+dgl_temporal_*/
