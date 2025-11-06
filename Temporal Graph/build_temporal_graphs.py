@@ -18,6 +18,8 @@ Usage:
 import argparse
 import json
 import os
+import re
+import string
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -49,6 +51,15 @@ def _pairs(indices: List[int]) -> List[Tuple[int, int]]:
     return out
 
 
+def _canon_entity(e: str) -> str:
+    """Lowercase, trim punctuation/extra spaces; returns '' if unusable."""
+    if not isinstance(e, str):
+        return ""
+    e = e.strip().strip(string.punctuation)
+    e = re.sub(r"\s+", " ", e).lower()
+    return e
+
+
 def build_graph_for_item(
     dialogues: List[str],
     entities_per_turn: List[List[str]],
@@ -69,19 +80,29 @@ def build_graph_for_item(
 
     zero_edge = torch.zeros(feat_dim)  # for temporal edges
 
-    # TEMPORAL: i -> i+1
+    # TEMPORAL: i -> i+1 and (NEW) back edge i+1 -> i
     for i in range(N - 1):
         src.append(i)
         dst.append(i + 1)
+        e_types.append(0)
+        e_feats.append(zero_edge)
+        # back edge
+        src.append(i + 1)
+        dst.append(i)
         e_types.append(0)
         e_feats.append(zero_edge)
 
     # ENTITY: undirected edges for every shared entity
     ent2turns: Dict[str, List[int]] = defaultdict(list)
     for i, ents in enumerate(entities_per_turn):
+        # per-turn de-dup after canonicalization to avoid multi-edges from repeats
+        turn_ents = set()
         for e in ents:
-            if isinstance(e, str) and e.strip():
-                ent2turns[e.strip()].append(i)
+            ce = _canon_entity(e)
+            if ce:
+                turn_ents.add(ce)
+        for ce in turn_ents:
+            ent2turns[ce].append(i)
 
     # Pre-encode each unique entity once
     uniq_entities = list(ent2turns.keys())
@@ -117,8 +138,8 @@ def build_graph_for_item(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="processed/diahalu_temporal.json")
-    ap.add_argument("--outdir", default="processed/dgl_temporal")
+    ap.add_argument("--input", default="Temporal Graph/processed/diahalu_temporal.json")
+    ap.add_argument("--outdir", default="Temporal Graph/processed/dgl_temporal")
     ap.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2")
     args = ap.parse_args()
 
