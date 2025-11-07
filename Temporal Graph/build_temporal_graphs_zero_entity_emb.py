@@ -127,7 +127,7 @@ def build_graph_for_item(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Temporal Graph/processed/diahalu_temporal.json")
-    ap.add_argument("--outdir", default="Temporal Graph/processed/dgl_temporal")
+    ap.add_argument("--outdir", default="Temporal Graph/processed/dgl_temporal_zero_entity_emb")
     ap.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2")
     args = ap.parse_args()
 

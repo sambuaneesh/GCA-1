@@ -12,11 +12,12 @@ import argparse
 import json
 import os
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import List
 
 import dgl
+import numpy as np
 import torch
 import torch.nn as nn
 from dgl.dataloading import GraphDataLoader
@@ -71,29 +72,9 @@ def collate(samples):
     return bg, y
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--graphs", default="Temporal Graph/processed/dgl_temporal")
-    ap.add_argument("--epochs", type=int, default=25)
-    ap.add_argument("--batch-size", type=int, default=16)
-    ap.add_argument("--lr", type=float, default=5e-4)
-    ap.add_argument("--hidden", type=int, default=256)
-    ap.add_argument("--layers", type=int, default=2)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--checkpoint", default="Temporal Graph/processed/temporal_entity_ckpt.pt")
-    ap.add_argument("--early-stop-patience", type=int, default=5, help="Early stopping patience (epochs)")
-    ap.add_argument(
-        "--sampling-scheme",
-        choices=["uniform6", "half_first"],
-        default="uniform6",
-        help=(
-            "Sampling weights: 'uniform6' gives 1/6 importance to each class (0..5); "
-            "'half_first' gives 1/2 to class 0 and spreads the rest equally over classes 1..5."
-        ),
-    )
-    args = ap.parse_args()
-
-    set_all_seeds(args.seed)
+def run_single_trial(args, seed, device):
+    """Run a single training trial and return metrics."""
+    set_all_seeds(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with open(Path(args.graphs) / "label_map.json", "r", encoding="utf-8") as f:
@@ -154,7 +135,7 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     loss_fn = nn.CrossEntropyLoss(weight=loss_class_w)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, verbose=True)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3)
 
     class_names = ["factual", "Reasoning Error", "Incoherence", "Irrelevance", "Overreliance", "non-factual"]
 
@@ -206,12 +187,12 @@ def main():
             recall_score(all_y_binary, all_pred_binary, average="binary", zero_division=0) if all_y_binary else 0.0
         )
 
-        print(
-            f"Epoch {epoch:03d} | train loss {total_loss / max(1, len(train_loader)):.4f} | "
-            f"val loss {val_loss / max(1, len(val_loader)):.4f}"
-        )
-        print(f"  6-way  | acc {acc_6way:.4f} | prec {prec_6way:.4f} | rec {rec_6way:.4f} | F1 {f1_6way:.4f}")
-        print(f"  binary | acc {acc_binary:.4f} | prec {prec_binary:.4f} | rec {rec_binary:.4f} | F1 {f1_binary:.4f}")
+        # print(
+        #     f"Epoch {epoch:03d} | train loss {total_loss / max(1, len(train_loader)):.4f} | "
+        #     f"val loss {val_loss / max(1, len(val_loader)):.4f}"
+        # )
+        # print(f"  6-way  | acc {acc_6way:.4f} | prec {prec_6way:.4f} | rec {rec_6way:.4f} | F1 {f1_6way:.4f}")
+        # print(f"  binary | acc {acc_binary:.4f} | prec {prec_binary:.4f} | rec {rec_binary:.4f} | F1 {f1_binary:.4f}")
 
         sched.step(acc_binary)
         if acc_binary > best_acc:
@@ -229,21 +210,21 @@ def main():
                 },
                 args.checkpoint,
             )
-            print(f"  saved best to {args.checkpoint}")
+            # print(f"  saved best to {args.checkpoint}")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-            print(f"  no improvement for {epochs_without_improvement} epoch(s)")
+            # print(f"  no improvement for {epochs_without_improvement} epoch(s)")
             if epochs_without_improvement >= args.early_stop_patience:
-                print(f"\nEarly stopping at epoch {epoch} (no improvement for {args.early_stop_patience} epochs)")
-                print(f"Best validation binary accuracy: {best_acc:.4f}")
+                # print(f"\nEarly stopping at epoch {epoch} (no improvement for {args.early_stop_patience} epochs)")
+                # print(f"Best validation binary accuracy: {best_acc:.4f}")
                 break
 
-    print("\n=== Evaluating best checkpoint on validation set ===")
+    # print("\n=== Evaluating best checkpoint on validation set ===")
     if not Path(args.checkpoint).exists():
         raise RuntimeError(f"Checkpoint {args.checkpoint} not found after training.")
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
 
@@ -270,21 +251,182 @@ def main():
     )
     print(report_6way)
 
-    all_y_best_bin = [0 if y == 0 else 1 for y in all_y_best]
-    all_pred_best_bin = [0 if p == 0 else 1 for p in all_pred_best]
-    uniq_labels_bin = sorted(set(all_y_best_bin))
-    target_names_bin = ["factual (y=0)", "non-factual (y>0)"]
-    target_names_bin = [target_names_bin[i] for i in uniq_labels_bin]
-    report_binary = classification_report(
-        all_y_best_bin,
-        all_pred_best_bin,
-        labels=uniq_labels_bin,
-        target_names=target_names_bin,
-        zero_division=0,
-        digits=4,
+    all_y_binary = [0 if y == 0 else 1 for y in all_y_best]
+    all_pred_binary = [0 if p == 0 else 1 for p in all_pred_best]
+    acc_binary = accuracy_score(all_y_binary, all_pred_binary) if all_y_binary else 0.0
+    f1_binary = f1_score(all_y_binary, all_pred_binary, average="binary", zero_division=0) if all_y_binary else 0.0
+    prec_binary = (
+        precision_score(all_y_binary, all_pred_binary, average="binary", zero_division=0) if all_y_binary else 0.0
     )
-    print(report_binary)
-    print(f"Best binary accuracy on validation during training: {best_acc:.4f} at epoch {best_epoch}")
+    rec_binary = recall_score(all_y_binary, all_pred_binary, average="binary", zero_division=0) if all_y_binary else 0.0
+
+    # Collect per-class metrics
+    per_class_metrics = {}
+    for i in uniq_labels:
+        class_mask = [y == i for y in all_y_best]
+        class_pred = [all_pred_best[j] for j in range(len(all_y_best)) if class_mask[j]]
+        class_true = [all_y_best[j] for j in range(len(all_y_best)) if class_mask[j]]
+
+        if len(class_true) > 0:
+            all_pred_as_class = [1 if p == i else 0 for p in all_pred_best]
+            all_true_as_class = [1 if t == i else 0 for t in all_y_best]
+
+            prec = precision_score(all_true_as_class, all_pred_as_class, zero_division=0)
+            rec = recall_score(all_true_as_class, all_pred_as_class, zero_division=0)
+            f1 = f1_score(all_true_as_class, all_pred_as_class, zero_division=0)
+
+            per_class_metrics[i] = {"precision": prec, "recall": rec, "f1": f1, "support": len(class_true)}
+
+    # Overall metrics (compute these properly)
+    prec_6way = precision_score(all_y_best, all_pred_best, average="macro", zero_division=0)
+    rec_6way = recall_score(all_y_best, all_pred_best, average="macro", zero_division=0)
+    f1_6way = f1_score(all_y_best, all_pred_best, average="macro", zero_division=0)
+
+    overall_metrics = {
+        "accuracy": accuracy_score(all_y_best, all_pred_best),
+        "macro_avg_precision": prec_6way,
+        "macro_avg_recall": rec_6way,
+        "macro_avg_f1": f1_6way,
+        "weighted_avg_precision": precision_score(all_y_best, all_pred_best, average="weighted", zero_division=0),
+        "weighted_avg_recall": recall_score(all_y_best, all_pred_best, average="weighted", zero_division=0),
+        "weighted_avg_f1": f1_score(all_y_best, all_pred_best, average="weighted", zero_division=0),
+        "binary_acc": acc_binary,
+        "binary_prec": prec_binary,
+        "binary_rec": rec_binary,
+        "binary_f1": f1_binary,
+    }
+
+    return per_class_metrics, overall_metrics
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--graphs", default="Temporal Graph/processed/dgl_temporal")
+    ap.add_argument("--epochs", type=int, default=25)
+    ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--checkpoint", default="Temporal Graph/processed/temporal_entity_ckpt.pt")
+    ap.add_argument("--early-stop-patience", type=int, default=5, help="Early stopping patience (epochs)")
+    ap.add_argument(
+        "--sampling-scheme",
+        choices=["uniform6", "half_first"],
+        default="uniform6",
+        help=(
+            "Sampling weights: 'uniform6' gives 1/6 importance to each class (0..5); "
+            "'half_first' gives 1/2 to class 0 and spreads the rest equally over classes 1..5."
+        ),
+    )
+    ap.add_argument("--num-trials", type=int, default=25, help="Number of trials to run")
+    args = ap.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Storage for all trials
+    all_per_class_metrics = defaultdict(lambda: defaultdict(list))
+    all_overall_metrics = defaultdict(list)
+
+    print(f"\nRunning {args.num_trials} trials with different seeds...")
+    print("=" * 80)
+
+    for trial in range(args.num_trials):
+        seed = args.seed  # Use the same seed for all trials
+        print(f"\nTrial {trial + 1}/{args.num_trials} (seed={seed})...")
+
+        per_class, overall = run_single_trial(args, seed, device)  # Store per-class metrics
+        for class_id, metrics in per_class.items():
+            for metric_name, value in metrics.items():
+                all_per_class_metrics[class_id][metric_name].append(value)
+
+        # Store overall metrics
+        for metric_name, value in overall.items():
+            all_overall_metrics[metric_name].append(value)
+
+    # Print results with mean +- std
+    print("\n" + "=" * 80)
+    print("RESULTS OVER", args.num_trials, "TRIALS")
+    print("=" * 80)
+    print()
+
+    class_names = ["factual", "Reasoning Error", "Incoherence", "Irrelevance", "Overreliance", "non-factual"]
+
+    # Print header
+    print(f"{'':>20} {'precision':>20} {'recall':>20} {'f1-score':>20} {'support':>10}")
+    print()
+
+    # Print per-class metrics
+    for class_id in sorted(all_per_class_metrics.keys()):
+        class_name = class_names[class_id]
+        prec_mean = np.mean(all_per_class_metrics[class_id]["precision"])
+        prec_std = np.std(all_per_class_metrics[class_id]["precision"])
+        rec_mean = np.mean(all_per_class_metrics[class_id]["recall"])
+        rec_std = np.std(all_per_class_metrics[class_id]["recall"])
+        f1_mean = np.mean(all_per_class_metrics[class_id]["f1"])
+        f1_std = np.std(all_per_class_metrics[class_id]["f1"])
+
+        # Get support from first trial data
+        support = all_per_class_metrics[class_id]["support"][0] if "support" in all_per_class_metrics[class_id] else 0
+
+        print(
+            f"{class_name:>20} {prec_mean:>8.4f}+-{prec_std:<9.4f} "
+            f"{rec_mean:>8.4f}+-{rec_std:<9.4f} "
+            f"{f1_mean:>8.4f}+-{f1_std:<9.4f} {support:>10}"
+        )
+
+    print()
+
+    # Print overall metrics
+    acc_mean = np.mean(all_overall_metrics["accuracy"])
+    acc_std = np.std(all_overall_metrics["accuracy"])
+    print(f"{'accuracy':>20} {acc_mean:>29.4f}+-{acc_std:<9.4f}")
+
+    macro_prec_mean = np.mean(all_overall_metrics["macro_avg_precision"])
+    macro_prec_std = np.std(all_overall_metrics["macro_avg_precision"])
+    macro_rec_mean = np.mean(all_overall_metrics["macro_avg_recall"])
+    macro_rec_std = np.std(all_overall_metrics["macro_avg_recall"])
+    macro_f1_mean = np.mean(all_overall_metrics["macro_avg_f1"])
+    macro_f1_std = np.std(all_overall_metrics["macro_avg_f1"])
+
+    print(
+        f"{'macro avg':>20} {macro_prec_mean:>8.4f}+-{macro_prec_std:<9.4f} "
+        f"{macro_rec_mean:>8.4f}+-{macro_rec_std:<9.4f} "
+        f"{macro_f1_mean:>8.4f}+-{macro_f1_std:<9.4f}"
+    )
+
+    weighted_prec_mean = np.mean(all_overall_metrics["weighted_avg_precision"])
+    weighted_prec_std = np.std(all_overall_metrics["weighted_avg_precision"])
+    weighted_rec_mean = np.mean(all_overall_metrics["weighted_avg_recall"])
+    weighted_rec_std = np.std(all_overall_metrics["weighted_avg_recall"])
+    weighted_f1_mean = np.mean(all_overall_metrics["weighted_avg_f1"])
+    weighted_f1_std = np.std(all_overall_metrics["weighted_avg_f1"])
+
+    print(
+        f"{'weighted avg':>20} {weighted_prec_mean:>8.4f}+-{weighted_prec_std:<9.4f} "
+        f"{weighted_rec_mean:>8.4f}+-{weighted_rec_std:<9.4f} "
+        f"{weighted_f1_mean:>8.4f}+-{weighted_f1_std:<9.4f}"
+    )
+
+    print()
+
+    # Binary metrics
+    bin_acc_mean = np.mean(all_overall_metrics["binary_acc"])
+    bin_acc_std = np.std(all_overall_metrics["binary_acc"])
+    bin_prec_mean = np.mean(all_overall_metrics["binary_prec"])
+    bin_prec_std = np.std(all_overall_metrics["binary_prec"])
+    bin_rec_mean = np.mean(all_overall_metrics["binary_rec"])
+    bin_rec_std = np.std(all_overall_metrics["binary_rec"])
+    bin_f1_mean = np.mean(all_overall_metrics["binary_f1"])
+    bin_f1_std = np.std(all_overall_metrics["binary_f1"])
+
+    print(
+        f"  binary | acc {bin_acc_mean:.4f}+-{bin_acc_std:.4f} | "
+        f"prec {bin_prec_mean:.4f}+-{bin_prec_std:.4f} | "
+        f"rec {bin_rec_mean:.4f}+-{bin_rec_std:.4f} | "
+        f"F1 {bin_f1_mean:.4f}+-{bin_f1_std:.4f}"
+    )
+    print()
 
 
 if __name__ == "__main__":

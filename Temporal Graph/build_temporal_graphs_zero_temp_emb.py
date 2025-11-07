@@ -81,19 +81,16 @@ def build_graph_for_item(
     zero_edge = torch.zeros(feat_dim)  # for temporal edges
 
     # TEMPORAL: undirected edges between i and i+1
-    # Encode "speaker changed" for temporal edges
-    speaker_changed_emb = _encode_batch(sent_embedder, ["speaker changed"])[0]
-
     for i in range(N - 1):
         src.append(i)
         dst.append(i + 1)
         e_types.append(0)
-        e_feats.append(speaker_changed_emb)
+        e_feats.append(zero_edge)
         # back edge
         src.append(i + 1)
         dst.append(i)
         e_types.append(0)
-        e_feats.append(speaker_changed_emb)
+        e_feats.append(zero_edge)
 
     # ENTITY: undirected edges for every shared entity
     ent2turns: Dict[str, List[int]] = defaultdict(list)
@@ -140,7 +137,7 @@ def build_graph_for_item(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Temporal Graph/processed/diahalu_temporal.json")
-    ap.add_argument("--outdir", default="Temporal Graph/processed/dgl_temporal")
+    ap.add_argument("--outdir", default="Temporal Graph/processed/dgl_temporal_zero_temp_emb")
     ap.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2")
     args = ap.parse_args()
 
