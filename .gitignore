@@ -71,3 +71,6 @@ rgcn_training/data/
 
 dgl_temporal/
 dgl_temporal_*/
+
+wikibio_formatted.json
+*.pt
